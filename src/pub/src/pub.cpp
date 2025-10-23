@@ -4,6 +4,7 @@
 // ros相关头文件
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "std_msgs/msg/string.hpp"
 
 // 图像处理相关头文件
 #include <cv_bridge/cv_bridge.h>
@@ -38,9 +39,18 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr left_pub;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr right_pub;
 
+    // 声明一个字符串发布者，跟图像同时发布，用于观察频率
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr str_pub;
+
     // 存储最新的左右目图像
     sensor_msgs::msg::Image left_img;
     sensor_msgs::msg::Image right_img;
+
+    // 控制发布频率（按目前来看，只对MPEG 3280*1080 30FPS进行控制，只需取对15取余为0的帧即可做到2hz）
+    int cnt = 15;
+
+    // 计算频率/间隔
+    uint64_t last = 0;
 
 public:
     // 构造函数，有一个参数为节点名称
@@ -50,10 +60,23 @@ public:
         // 初始化左右目发布者
         left_pub = this->create_publisher<sensor_msgs::msg::Image>("left", 10);
         right_pub = this->create_publisher<sensor_msgs::msg::Image>("right", 10);
+
+        str_pub = this->create_publisher<std_msgs::msg::String>("hz", 10);
     }
 
     // 转换图像
     void convert_frame_to_ros_image(Frame_Buffer_Data* pFrame) {
+        // 统一时间戳
+        auto stamp = this->now();
+
+        // 打印两次发布图片时间间隔
+        uint64_t nanoseconds = stamp.nanoseconds();
+        if(last == 0)
+            fprintf(stderr,"first pub\r\n");
+        else
+            fprintf(stderr,"img pub interval %.2fms\r\n", (nanoseconds - last) / 1e6);
+        last = nanoseconds;
+
         // 获取图像宽高
         int width = pFrame->PixFormat.u_Width;
         int height = pFrame->PixFormat.u_Height;
@@ -83,9 +106,6 @@ public:
                 "bgr8",  // 转换为 BGR8 格式
                 right
             );
-
-            // 统一时间戳
-            auto stamp = this->now();
 
             auto left_msg = new_left.toImageMsg();
             left_msg->header.stamp = stamp;
@@ -126,9 +146,6 @@ public:
                 "bgr8",
                 right
             );
-            
-            // 统一时间戳
-            auto stamp = this->now();
 
             auto left_msg = new_left.toImageMsg();
             left_msg->header.stamp = stamp;
@@ -148,6 +165,10 @@ public:
     {
         left_pub->publish(left_img);
         right_pub->publish(right_img);
+
+        std_msgs::msg::String s;
+        s.data = "oi";
+        str_pub->publish(s);
     }
 
     // 循环取图
@@ -296,16 +317,19 @@ public:
                 // fflush(File_fd);
                 // fclose(File_fd);
 
-                // 发布图像
-                this->convert_frame_to_ros_image(pFrame);
-                this->publish();
+                // 控制频率发布图像
+                if(pFrame->index % cnt == 0)
+                {
+                    this->convert_frame_to_ros_image(pFrame);
+                    this->publish();
+                }
 
                 // if(pFrame->index >= 10000)
                 // {
                 //     EXIT = 0;
                 // }
 
-                fprintf(stderr,"pFrame->index:%02d PixFormat.u_Fps.:%d\r\n",pFrame->index,pFrame->PixFormat.u_Fps);
+                // fprintf(stderr,"pFrame->index:%02d PixFormat.u_Fps.:%d\r\n",pFrame->index,pFrame->PixFormat.u_Fps);
 
                 // 及时释放？
                 TST_USBCam_SAVE_FRAME_RES(pUSBCam,pFrame);
