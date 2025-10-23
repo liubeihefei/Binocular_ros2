@@ -38,6 +38,10 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr left_pub;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr right_pub;
 
+    // 存储最新的左右目图像
+    sensor_msgs::msg::Image left_img;
+    sensor_msgs::msg::Image right_img;
+
 public:
     // 构造函数，有一个参数为节点名称
     ImagePublisher(std::string name) : Node(name)
@@ -49,20 +53,14 @@ public:
     }
 
     // 转换图像
-    std::vector<sensor_msgs::msg::Image> convert_frame_to_ros_image(Frame_Buffer_Data* pFrame) {
-        sensor_msgs::msg::Image ros_image;
+    void convert_frame_to_ros_image(Frame_Buffer_Data* pFrame) {
+        // 获取图像宽高
+        int width = pFrame->PixFormat.u_Width;
+        int height = pFrame->PixFormat.u_Height;
         
-        // 设置头信息
-        ros_image.header.stamp = this->now();
-        ros_image.header.frame_id = std::to_string(pFrame->index);
-        
-        // 设置图像基本信息
-        ros_image.height = pFrame->PixFormat.u_Height;
-        ros_image.width = pFrame->PixFormat.u_Width;
-        
-        // 根据像素格式处理
+        // 处理MJPEG格式
         if(pFrame->PixFormat.u_PixFormat == 0) {
-            // 将JPEG数据转换为OpenCV Mat
+            // 将MJPEG数据转换为OpenCV Mat
             std::vector<uint8_t> jpeg_data(
                 static_cast<uint8_t*>(pFrame->pMem),
                 static_cast<uint8_t*>(pFrame->pMem) + pFrame->buffer.bytesused
@@ -71,10 +69,9 @@ public:
             cv::Mat image = cv::imdecode(jpeg_data, cv::IMREAD_COLOR);
 
             //裁剪图像
-            cv::Mat left = image(cv::Range(0, 1080), cv::Range(0, 1920));
-            cv::Mat right = image(cv::Range(0, 1080), cv::Range(1920, 3840));
+            cv::Mat left = image(cv::Range(0, height), cv::Range(0, width / 2));
+            cv::Mat right = image(cv::Range(0, height), cv::Range(width / 2, width));
 
-            std::vector<sensor_msgs::msg::Image> result;
             auto new_left = cv_bridge::CvImage(
                 std_msgs::msg::Header(),
                 "bgr8",  // 转换为 BGR8 格式
@@ -87,29 +84,73 @@ public:
                 right
             );
 
+            // 统一时间戳
+            auto stamp = this->now();
+
             auto left_msg = new_left.toImageMsg();
-            left_msg->header.stamp = this->now();
+            left_msg->header.stamp = stamp;
             left_msg->header.frame_id = std::to_string(pFrame->index);
 
             auto right_msg = new_right.toImageMsg();
-            right_msg->header.stamp = this->now();
+            right_msg->header.stamp = stamp;
             right_msg->header.frame_id = std::to_string(pFrame->index);
 
-            result.push_back(*left_msg);
-            result.push_back(*right_msg);
+            left_img = *left_msg;
+            right_img = *right_msg;
+        }
+        // 处理YUYV格式
+        else{
+            int width = pFrame->PixFormat.u_Width;
+            int height = pFrame->PixFormat.u_Height;
+            
+            // 创建YUYV格式的Mat
+            cv::Mat yuyv_image(height, width, CV_8UC2, pFrame->pMem);
+            
+            // 转换为BGR格式
+            cv::Mat bgr_image;
+            cv::cvtColor(yuyv_image, bgr_image, cv::COLOR_YUV2BGR_YUYV);
+            
+            // 裁剪图像为左右两个
+            cv::Mat left = bgr_image(cv::Range(0, height), cv::Range(0, width/2));
+            cv::Mat right = bgr_image(cv::Range(0, height), cv::Range(width/2, width));
 
-            return result;
-    }
+            // 转换为ROS图像消息
+            auto new_left = cv_bridge::CvImage(
+                std_msgs::msg::Header(),
+                "bgr8",
+                left
+            );
+
+            auto new_right = cv_bridge::CvImage(
+                std_msgs::msg::Header(),
+                "bgr8",
+                right
+            );
+            
+            // 统一时间戳
+            auto stamp = this->now();
+
+            auto left_msg = new_left.toImageMsg();
+            left_msg->header.stamp = stamp;
+            left_msg->header.frame_id = std::to_string(pFrame->index);
+
+            auto right_msg = new_right.toImageMsg();
+            right_msg->header.stamp = stamp;
+            right_msg->header.frame_id = std::to_string(pFrame->index);
+
+            left_img = *left_msg;
+            right_img = *right_msg;
+        }
     }
 
     // 非回调式发布图像
-    void publish(std::vector<sensor_msgs::msg::Image>& imgs)
+    void publish()
     {
-        left_pub->publish(imgs[0]);
-        right_pub->publish(imgs[1]);
+        left_pub->publish(left_img);
+        right_pub->publish(right_img);
     }
 
-    // 取图
+    // 循环取图
     int getImg()
     {
         // 使ctrl+c能终止所有进程
@@ -185,11 +226,11 @@ public:
         // 打印所有的格式信息（是指当前相机所有可能的格式、分辨率、帧率组合）
         for(int32_t i = 0 ; i < pix_format_size ; i++)
         {
-            fprintf(stderr," %C%C%C%C %dx%d %d fps\r\n",
-                ppix_format[i].u_PixFormat>>0 &0xFF,
-                ppix_format[i].u_PixFormat>>8 &0xFF,
-                ppix_format[i].u_PixFormat>>16 &0xFF,
-                ppix_format[i].u_PixFormat>>24 &0xFF,
+            fprintf(stderr," %c%c%c%c %dx%d %d fps\r\n",
+                ppix_format[i].u_PixFormat>>0 & 0xFF,
+                ppix_format[i].u_PixFormat>>8 & 0xFF,
+                ppix_format[i].u_PixFormat>>16 & 0xFF,
+                ppix_format[i].u_PixFormat>>24 & 0xFF,
                 ppix_format[i].u_Width,
                 ppix_format[i].u_Height,
                 ppix_format[i].u_Fps);
@@ -256,8 +297,8 @@ public:
                 // fclose(File_fd);
 
                 // 发布图像
-                std::vector<sensor_msgs::msg::Image> pub = this->convert_frame_to_ros_image(pFrame);
-                this->publish(pub);
+                this->convert_frame_to_ros_image(pFrame);
+                this->publish();
 
                 // if(pFrame->index >= 10000)
                 // {
@@ -270,6 +311,7 @@ public:
                 TST_USBCam_SAVE_FRAME_RES(pUSBCam,pFrame);
             }
         }
+        return 0;
     }
 };
 
@@ -280,7 +322,7 @@ int main(int argc, char *argv[])
     // 创建节点
     auto node = std::make_shared<ImagePublisher>("ImagePublisher");
 
-    if(node->getImg())
+    if(node->getImg() == -1)
         return -1;
  
     return 0;

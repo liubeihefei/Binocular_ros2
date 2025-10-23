@@ -1,12 +1,15 @@
 #include "cam.hpp"
 
-static int32_t api_get_thread_policy (pthread_attr_t *attr)
+
+int32_t api_get_thread_policy (pthread_attr_t *attr)
 {
     int32_t policy;
 
     int32_t rs = pthread_attr_getschedpolicy (attr, &policy);
 
-    //assert (rs == 0);
+    // assert (rs == 0);
+
+    fprintf (stderr, "rs %d\n", rs);
 
     switch (policy)
     {
@@ -28,7 +31,7 @@ static int32_t api_get_thread_policy (pthread_attr_t *attr)
     return policy;
 }
 
-static void api_set_thread_policy (pthread_attr_t *attr)
+void api_set_thread_policy (pthread_attr_t *attr)
 {
     //int rs = pthread_attr_setschedpolicy (attr, policy);
 

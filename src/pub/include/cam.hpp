@@ -10,9 +10,9 @@
 
 
 // 函数声明
-static int32_t api_get_thread_policy (pthread_attr_t *attr);
+int32_t api_get_thread_policy(pthread_attr_t *attr);
 
-static void api_set_thread_policy (pthread_attr_t *attr);
+void api_set_thread_policy(pthread_attr_t *attr);
 
 void Set_Thread_attr();
 
