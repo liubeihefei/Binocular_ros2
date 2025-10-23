@@ -175,8 +175,8 @@ public:
     int getImg()
     {
         // 使ctrl+c能终止所有进程
-        signal(SIGINT,SIG_QUIT);
-        signal(SIGQUIT,SIG_QUIT);
+        signal(SIGINT, SIG_QUIT);
+        signal(SIGQUIT, SIG_QUIT);
 
         int32_t fd;
         v4l2_dev_sys_data_t *pdevinfo = NULL;
@@ -238,14 +238,14 @@ public:
         // 获取格式、分辨率、帧率
         int32_t pix_format_size = TST_USBCam_Get_Format_List_Size(pUSBCam);
 
-        fprintf(stderr,"pix_format_size:%d\r\n",pix_format_size);
+        fprintf(stderr,"pix_format_size:%d\r\n", pix_format_size);
 
         ppix_format = new Pix_Format[pix_format_size];
 
         TST_USBCam_Get_Format_List(pUSBCam, ppix_format);
 
         // 打印所有的格式信息（是指当前相机所有可能的格式、分辨率、帧率组合）
-        for(int32_t i = 0 ; i < pix_format_size ; i++)
+        for(int32_t i = 0; i < pix_format_size; i++)
         {
             fprintf(stderr," %c%c%c%c %dx%d %d fps\r\n",
                 ppix_format[i].u_PixFormat>>0 & 0xFF,
@@ -332,7 +332,7 @@ public:
                 // fprintf(stderr,"pFrame->index:%02d PixFormat.u_Fps.:%d\r\n",pFrame->index,pFrame->PixFormat.u_Fps);
 
                 // 及时释放？
-                TST_USBCam_SAVE_FRAME_RES(pUSBCam,pFrame);
+                TST_USBCam_SAVE_FRAME_RES(pUSBCam, pFrame);
             }
         }
         return 0;
