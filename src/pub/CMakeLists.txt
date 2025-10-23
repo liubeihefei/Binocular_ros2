@@ -66,3 +66,9 @@ DESTINATION lib/${PROJECT_NAME}
 install(DIRECTORY lib/  
   DESTINATION lib/     
 )
+
+# 移动launch
+install(DIRECTORY
+launch
+DESTINATION share/${PROJECT_NAME}
+)
