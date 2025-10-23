@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.5)
-project(cam)
+project(pub)
 
 # Default to C99
 if(NOT CMAKE_C_STANDARD)
@@ -42,9 +42,9 @@ ament_package()
 
 include_directories(include)
 
-add_executable(cam src/cam.cpp)
+add_executable(pub src/cam.cpp src/pub.cpp)
 
-ament_target_dependencies(cam
+ament_target_dependencies(pub
 rclcpp
 udev
 sensor_msgs
@@ -52,13 +52,13 @@ cv_bridge
 OpenCV
 )
 
-target_link_libraries(cam  
+target_link_libraries(pub  
   ${PROJECT_SOURCE_DIR}/lib/libtstc_usbcam.so
   ${udev_LIBRARIES}
 )
 
 install(TARGETS
-cam
+pub
 DESTINATION lib/${PROJECT_NAME}
 )
 
