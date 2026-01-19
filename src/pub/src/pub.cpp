@@ -39,6 +39,8 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr left_pub;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr right_pub;
 
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr img_pub;
+
     // 声明一个字符串发布者，跟图像同时发布，用于观察频率
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr str_pub;
 
@@ -46,8 +48,10 @@ private:
     sensor_msgs::msg::Image left_img;
     sensor_msgs::msg::Image right_img;
 
+    sensor_msgs::msg::Image img;
+
     // 控制发布频率（按目前来看，只对MPEG 3280*1080 30FPS进行控制，只需取对15取余为0的帧即可做到2hz）
-    int cnt = 15;
+    int cnt = 6;
 
     // 计算频率/间隔
     uint64_t last = 0;
@@ -57,15 +61,17 @@ public:
     ImagePublisher(std::string name) : Node(name)
     {
         RCLCPP_INFO(this->get_logger(), "%s节点启动.", name.c_str());
-        // 初始化左右目发布者
-        left_pub = this->create_publisher<sensor_msgs::msg::Image>("left", 10);
-        right_pub = this->create_publisher<sensor_msgs::msg::Image>("right", 10);
+        // // 初始化左右目发布者
+        // left_pub = this->create_publisher<sensor_msgs::msg::Image>("/bino/left", 10);
+        // right_pub = this->create_publisher<sensor_msgs::msg::Image>("/bino/img", 10);
+
+        img_pub = this->create_publisher<sensor_msgs::msg::Image>("/bino/img", 10);
 
         str_pub = this->create_publisher<std_msgs::msg::String>("hz", 10);
     }
 
-    // 转换图像
-    void convert_frame_to_ros_image(Frame_Buffer_Data* pFrame) {
+    // 转换图像，双目各自发布
+    void convert_frame_to_ros_image_split(Frame_Buffer_Data* pFrame) {
         // 统一时间戳
         auto stamp = this->now();
 
@@ -94,6 +100,13 @@ public:
             //裁剪图像
             cv::Mat left = image(cv::Range(0, height), cv::Range(0, width / 2));
             cv::Mat right = image(cv::Range(0, height), cv::Range(width / 2, width));
+
+            cv::Mat left_flip, right_flip;
+            cv::flip(left, left_flip, -1);
+            cv::flip(right, right_flip, -1);
+
+            left = right_flip;
+            right = left_flip;
 
             auto new_left = cv_bridge::CvImage(
                 std_msgs::msg::Header(),
@@ -160,11 +173,86 @@ public:
         }
     }
 
-    // 非回调式发布图像
-    void publish()
+    // 转换图像，双目合并发布
+    void convert_frame_to_ros_image_all(Frame_Buffer_Data* pFrame) {
+        // 统一时间戳
+        auto stamp = this->now();
+
+        // 打印两次发布图片时间间隔
+        uint64_t nanoseconds = stamp.nanoseconds();
+        if(last == 0)
+            fprintf(stderr,"first pub\r\n");
+        else
+            fprintf(stderr,"img pub interval %.2fms\r\n", (nanoseconds - last) / 1e6);
+        last = nanoseconds;
+        
+        // 处理MJPEG格式
+        if(pFrame->PixFormat.u_PixFormat == 0) {
+            // 将MJPEG数据转换为OpenCV Mat
+            std::vector<uint8_t> jpeg_data(
+                static_cast<uint8_t*>(pFrame->pMem),
+                static_cast<uint8_t*>(pFrame->pMem) + pFrame->buffer.bytesused
+            );
+            
+            cv::Mat image = cv::imdecode(jpeg_data, cv::IMREAD_COLOR);
+
+            cv::Mat img_flip;
+            cv::flip(image, img_flip, -1);
+
+            auto new_img = cv_bridge::CvImage(
+                std_msgs::msg::Header(),
+                "bgr8",  // 转换为 BGR8 格式
+                img_flip
+            );
+
+            auto img_msg = new_img.toImageMsg();
+            img_msg->header.stamp = stamp;
+            img_msg->header.frame_id = std::to_string(pFrame->index);
+
+            img = *img_msg;
+        }
+        // 处理YUYV格式
+        else{
+            int width = pFrame->PixFormat.u_Width;
+            int height = pFrame->PixFormat.u_Height;
+            
+            // 创建YUYV格式的Mat
+            cv::Mat yuyv_image(height, width, CV_8UC2, pFrame->pMem);
+            
+            // 转换为BGR格式
+            cv::Mat bgr_image;
+            cv::cvtColor(yuyv_image, bgr_image, cv::COLOR_YUV2BGR_YUYV);
+
+            // 转换为ROS图像消息
+            auto new_img = cv_bridge::CvImage(
+                std_msgs::msg::Header(),
+                "bgr8",
+                bgr_image
+            );
+
+            auto img_msg = new_img.toImageMsg();
+            img_msg->header.stamp = stamp;
+            img_msg->header.frame_id = std::to_string(pFrame->index);
+
+            img = *img_msg;
+        }
+    }
+
+    // 非回调式发布图像，双目各自发布
+    void publish_split()
     {
         left_pub->publish(left_img);
         right_pub->publish(right_img);
+
+        std_msgs::msg::String s;
+        s.data = "oi";
+        str_pub->publish(s);
+    }
+
+    // 非回调式发布图像，双目合并发布
+    void publish_all()
+    {
+        img_pub->publish(img);
 
         std_msgs::msg::String s;
         s.data = "oi";
@@ -288,12 +376,23 @@ public:
 
         while(EXIT)
         {
+            // 监测相机是否在线
+            int32_t ret = TST_USBCam_DEVICE_FIND_ID(&pdevinfo, 0xFFFF, 0xFFFF);
+
+            // 无设备则退出
+            if((ret == NULL_RETURN) || (ret == 0))
+            {
+                fprintf(stdout, "NULL Device\r\n");
+                
+                EXIT = 0;
+            }
+
             // 获取一帧图像
             Frame_Buffer_Data * pFrame = TST_USBCam_GET_FRAME_BUFF(pUSBCam, 0);
 
             if(pFrame != NULL)
             {
-                // 写入图像
+                // // 写入图像
                 // char path[256];
 
                 // if(pFrame->PixFormat.u_PixFormat == 0)
@@ -320,8 +419,14 @@ public:
                 // 控制频率发布图像
                 if(pFrame->index % cnt == 0)
                 {
-                    this->convert_frame_to_ros_image(pFrame);
-                    this->publish();
+                    // this->convert_frame_to_ros_image_split(pFrame);
+                    // this->publish_split();
+
+                    this->convert_frame_to_ros_image_all(pFrame);
+                    this->publish_all();
+
+                    // this->convert_frame_to_ros_image_split(pFrame);
+                    // this->publish_split();
                 }
 
                 // if(pFrame->index >= 10000)

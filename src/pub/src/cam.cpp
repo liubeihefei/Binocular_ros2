@@ -78,8 +78,8 @@ void* USBCam_STREAM_DEAL(void*pUSBCam)
     Pix_Format Cfg;
 
     Cfg.u_PixFormat = 0;// MJPEG格式
-    Cfg.u_Width = 3840;
-    Cfg.u_Height = 1080;
+    Cfg.u_Width = 1280;
+    Cfg.u_Height = 720;
     Cfg.u_Fps = 30;
 
     TST_USBCam_Video_DEAL_WITH         (pUSBCam,Cfg);
