@@ -10,10 +10,24 @@
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
 
+// Socket相关头文件
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <string.h>
+#include <vector>
+#include <sys/stat.h>
+#include <chrono>
+
 // 全局变量
 void *GP3DStram = NULL;
 bool EXIT = 1;
 
+// Socket相关全局变量
+int socket_fd = -1;
+bool socket_connected = false;
 
 void SIG_QUIT(int signal)
 {
@@ -27,8 +41,134 @@ void SIG_QUIT(int signal)
 
         // 处理完最后一帧返回
         TST_USBCam_EVENT_LoopMode(GP3DStram, 0);
+        
+        // 关闭socket连接
+        if (socket_fd >= 0) {
+            close(socket_fd);
+            socket_fd = -1;
+            socket_connected = false;
+        }
     }
+}
 
+// 检查socket文件是否存在
+bool socket_exists() {
+    struct stat buffer;
+    return (stat("/tmp/bino_img.sock", &buffer) == 0);
+}
+
+// 连接到Unix Socket服务器（使用阻塞模式）
+bool connect_to_socket() {
+    if (socket_connected && socket_fd >= 0) {
+        return true; // 已经连接
+    }
+    
+    // 检查socket文件是否存在
+    if (!socket_exists()) {
+        return false; // socket文件不存在，服务器没启动
+    }
+    
+    // 创建socket
+    socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (socket_fd < 0) {
+        fprintf(stderr, "Failed to create socket: %s\n", strerror(errno));
+        return false;
+    }
+    
+    // 设置为阻塞模式（默认就是阻塞，但为了明确设置）
+    int flags = fcntl(socket_fd, F_GETFL, 0);
+    fcntl(socket_fd, F_SETFL, flags & ~O_NONBLOCK);
+    
+    // 连接到服务器
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/tmp/bino_img.sock", sizeof(addr.sun_path) - 1);
+    
+    // 连接（阻塞模式，会等待连接完成或失败）
+    int result = connect(socket_fd, (struct sockaddr*)&addr, sizeof(addr));
+    if (result < 0) {
+        if (errno != ECONNREFUSED && errno != ENOENT) {
+            fprintf(stderr, "Failed to connect to socket: %s\n", strerror(errno));
+        }
+        close(socket_fd);
+        socket_fd = -1;
+        return false;
+    }
+    
+    socket_connected = true;
+    fprintf(stderr, "Connected to socket server at /tmp/bino_img.sock\n");
+    return true;
+}
+
+// 检查socket连接状态并尝试重连
+void check_and_reconnect_socket() {
+    if (!socket_connected) {
+        // 尝试连接
+        connect_to_socket();
+    }
+    // 对于阻塞socket，不需要检查连接状态
+    // 如果连接断开，下次发送时会收到错误
+}
+
+// 通过socket发送图像数据（按照要求格式：8字节时间戳 + 8字节图像大小 + 图像数据）
+bool send_image_via_socket(const cv::Mat& image, uint64_t timestamp) {
+    if (!socket_connected || socket_fd < 0) {
+        return false; // 没有连接
+    }
+    
+    // 计算图像数据大小（使用step确保考虑内存对齐）
+    uint64_t image_size = image.step * image.rows;
+    
+    // 调试信息
+    static int frame_count = 0;
+    frame_count++;
+    fprintf(stderr, "[Socket #%d] Sending image: %dx%d, size: %lu bytes\n",
+           frame_count, image.cols, image.rows, image_size);
+    
+    // 准备发送缓冲区（头部+图像数据）
+    size_t total_size = 16 + image_size; // 16字节头部 + 图像数据
+    std::vector<uint8_t> send_buffer(total_size);
+    
+    // 填充头部：8字节时间戳 + 8字节图像大小
+    uint64_t* header = reinterpret_cast<uint64_t*>(send_buffer.data());
+    header[0] = timestamp;    // 时间戳
+    header[1] = image_size;   // 图像大小
+    
+    // 复制图像数据
+    memcpy(send_buffer.data() + 16, image.data, image_size);
+    
+    // 一次性发送所有数据（阻塞发送）
+    const uint8_t* data_ptr = send_buffer.data();
+    size_t remaining = total_size;
+    
+    while (remaining > 0) {
+        ssize_t bytes_sent = send(socket_fd, data_ptr, remaining, MSG_NOSIGNAL);
+        
+        if (bytes_sent <= 0) {
+            if (bytes_sent < 0) {
+                // 发送错误
+                if (errno == EPIPE || errno == ECONNRESET) {
+                    fprintf(stderr, "Socket connection broken: %s\n", strerror(errno));
+                } else {
+                    fprintf(stderr, "Failed to send data: %s\n", strerror(errno));
+                }
+            }
+            
+            // 关闭连接
+            close(socket_fd);
+            socket_fd = -1;
+            socket_connected = false;
+            return false;
+        }
+        
+        data_ptr += bytes_sent;
+        remaining -= bytes_sent;
+    }
+    
+    fprintf(stderr, "[Socket #%d] Image sent successfully: %lu bytes\n", 
+           frame_count, total_size);
+    return true;
 }
 
 // 发布节点类
@@ -61,6 +201,14 @@ public:
     ImagePublisher(std::string name) : Node(name)
     {
         RCLCPP_INFO(this->get_logger(), "%s节点启动.", name.c_str());
+        
+        // 检查socket服务器是否可用
+        if (socket_exists()) {
+            fprintf(stderr, "Socket server found at /tmp/bino_img.sock, will connect when needed\n");
+        } else {
+            fprintf(stderr, "No socket server found at /tmp/bino_img.sock\n");
+        }
+        
         // // 初始化左右目发布者
         // left_pub = this->create_publisher<sensor_msgs::msg::Image>("/bino/left", 10);
         // right_pub = this->create_publisher<sensor_msgs::msg::Image>("/bino/img", 10);
@@ -108,6 +256,12 @@ public:
             left = right_flip;
             right = left_flip;
 
+            // 通过socket发送左右图像（按新格式）
+            if (socket_connected) {
+                send_image_via_socket(left, nanoseconds);
+                send_image_via_socket(right, nanoseconds);
+            }
+
             auto new_left = cv_bridge::CvImage(
                 std_msgs::msg::Header(),
                 "bgr8",  // 转换为 BGR8 格式
@@ -146,6 +300,12 @@ public:
             // 裁剪图像为左右两个
             cv::Mat left = bgr_image(cv::Range(0, height), cv::Range(0, width/2));
             cv::Mat right = bgr_image(cv::Range(0, height), cv::Range(width/2, width));
+
+            // 通过socket发送左右图像（按新格式）
+            if (socket_connected) {
+                send_image_via_socket(left, nanoseconds);
+                send_image_via_socket(right, nanoseconds);
+            }
 
             // 转换为ROS图像消息
             auto new_left = cv_bridge::CvImage(
@@ -186,6 +346,8 @@ public:
             fprintf(stderr,"img pub interval %.2fms\r\n", (nanoseconds - last) / 1e6);
         last = nanoseconds;
         
+        cv::Mat final_image;
+        
         // 处理MJPEG格式
         if(pFrame->PixFormat.u_PixFormat == 0) {
             // 将MJPEG数据转换为OpenCV Mat
@@ -196,20 +358,7 @@ public:
             
             cv::Mat image = cv::imdecode(jpeg_data, cv::IMREAD_COLOR);
 
-            cv::Mat img_flip;
-            cv::flip(image, img_flip, -1);
-
-            auto new_img = cv_bridge::CvImage(
-                std_msgs::msg::Header(),
-                "bgr8",  // 转换为 BGR8 格式
-                img_flip
-            );
-
-            auto img_msg = new_img.toImageMsg();
-            img_msg->header.stamp = stamp;
-            img_msg->header.frame_id = std::to_string(pFrame->index);
-
-            img = *img_msg;
+            cv::flip(image, final_image, -1);
         }
         // 处理YUYV格式
         else{
@@ -220,22 +369,26 @@ public:
             cv::Mat yuyv_image(height, width, CV_8UC2, pFrame->pMem);
             
             // 转换为BGR格式
-            cv::Mat bgr_image;
-            cv::cvtColor(yuyv_image, bgr_image, cv::COLOR_YUV2BGR_YUYV);
-
-            // 转换为ROS图像消息
-            auto new_img = cv_bridge::CvImage(
-                std_msgs::msg::Header(),
-                "bgr8",
-                bgr_image
-            );
-
-            auto img_msg = new_img.toImageMsg();
-            img_msg->header.stamp = stamp;
-            img_msg->header.frame_id = std::to_string(pFrame->index);
-
-            img = *img_msg;
+            cv::cvtColor(yuyv_image, final_image, cv::COLOR_YUV2BGR_YUYV);
         }
+        
+        // 通过socket发送完整图像（按新格式）
+        if (socket_connected) {
+            send_image_via_socket(final_image, nanoseconds);
+        }
+
+        // 转换为ROS图像消息
+        auto new_img = cv_bridge::CvImage(
+            std_msgs::msg::Header(),
+            "bgr8",
+            final_image
+        );
+
+        auto img_msg = new_img.toImageMsg();
+        img_msg->header.stamp = stamp;
+        img_msg->header.frame_id = std::to_string(pFrame->index);
+
+        img = *img_msg;
     }
 
     // 非回调式发布图像，双目各自发布
@@ -376,6 +529,9 @@ public:
 
         while(EXIT)
         {
+            // 检查和维护socket连接
+            check_and_reconnect_socket();
+            
             // 监测相机是否在线
             int32_t ret = TST_USBCam_DEVICE_FIND_ID(&pdevinfo, 0xFFFF, 0xFFFF);
 
@@ -392,30 +548,6 @@ public:
 
             if(pFrame != NULL)
             {
-                // // 写入图像
-                // char path[256];
-
-                // if(pFrame->PixFormat.u_PixFormat == 0)
-                //     {
-                //         // snprintf(path, 256,"%d.jpg", pFrame->index);
-                //         std::string temp = "temp/" + std::to_string(pFrame->index) + ".jpg";
-                //         const char* cstr = temp.c_str();
-                //         snprintf(path, 256, cstr);
-                //     }
-                // else
-                //     snprintf(path,256,"%d.bmp", pFrame->index);
-
-                // FILE * File_fd = fopen(path, "w+");
-
-                // if(File_fd == NULL)
-                // {
-                //     continue;
-                // }
-
-                // fwrite(pFrame->pMem,pFrame->buffer.bytesused,1,File_fd);
-                // fflush(File_fd);
-                // fclose(File_fd);
-
                 // 控制频率发布图像
                 if(pFrame->index % cnt == 0)
                 {
@@ -429,17 +561,18 @@ public:
                     // this->publish_split();
                 }
 
-                // if(pFrame->index >= 10000)
-                // {
-                //     EXIT = 0;
-                // }
-
-                // fprintf(stderr,"pFrame->index:%02d PixFormat.u_Fps.:%d\r\n",pFrame->index,pFrame->PixFormat.u_Fps);
-
                 // 及时释放？
                 TST_USBCam_SAVE_FRAME_RES(pUSBCam, pFrame);
             }
         }
+        
+        // 清理socket资源
+        if (socket_fd >= 0) {
+            close(socket_fd);
+            socket_fd = -1;
+            socket_connected = false;
+        }
+        
         return 0;
     }
 };
